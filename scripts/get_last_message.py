@@ -1,250 +1,335 @@
-import os
-import json
-import requests
-from datetime import datetime
+#!/usr/bin/env python3
+"""
+Get last message from Telegram channel using Telethon
+Works for any public channel without needing bot to join
+"""
 
-def extract_channel_info(channel_url):
-    """Extract channel username from URL or direct username"""
+import os
+import sys
+import json
+from datetime import datetime
+from telethon import TelegramClient
+from telethon.errors import (
+    ChannelPrivateError, 
+    ChannelInvalidError,
+    UsernameNotOccupiedError
+)
+from telethon.tl.types import (
+    MessageMediaPhoto,
+    MessageMediaDocument,
+    MessageMediaWebPage
+)
+
+def clean_channel_url(channel_url):
+    """Extract clean channel username from URL"""
     if not channel_url:
         return None
     
-    channel_url = channel_url.strip().lstrip('@')
+    channel_url = channel_url.strip()
     
+    # Remove @ if present
+    if channel_url.startswith('@'):
+        channel_url = channel_url[1:]
+    
+    # Extract from t.me URL
     if 't.me/' in channel_url:
-        channel_url = channel_url.split('t.me/')[-1].split('/')[0]
+        parts = channel_url.split('t.me/')
+        if len(parts) > 1:
+            channel_url = parts[1].split('/')[0]
     
-    if '?' in channel_url:
-        channel_url = channel_url.split('?')[0]
+    # Remove joinchat/ prefix
+    if channel_url.startswith('joinchat/'):
+        channel_url = channel_url.replace('joinchat/', '')
     
     return channel_url
 
-def get_channel_messages(bot_token, channel_username):
-    """Get last message from channel using multiple methods"""
-    
-    chat_info_url = f"https://api.telegram.org/bot{bot_token}/getChat?chat_id=@{channel_username}"
-    
-    try:
-        chat_response = requests.get(chat_info_url)
-        chat_data = chat_response.json()
-        
-        if not chat_data.get('ok'):
-            return {
-                'success': False,
-                'error': f"Cannot access channel: {chat_data.get('description', 'Unknown error')}"
-            }
-        
-        chat_id = chat_data['result']['id']
-        chat_info = {
-            'id': chat_id,
-            'title': chat_data['result'].get('title', channel_username),
-            'username': channel_username,
-            'type': chat_data['result'].get('type', 'channel')
-        }
-        
-        updates_url = f"https://api.telegram.org/bot{bot_token}/getUpdates?limit=100&timeout=0"
-        updates_response = requests.get(updates_url)
-        updates_data = updates_response.json()
-        
-        last_message = None
-        
-        if updates_data.get('ok') and updates_data.get('result'):
-            for update in reversed(updates_data['result']):
-                message = None
-                if 'channel_post' in update:
-                    if update['channel_post']['chat']['id'] == chat_id:
-                        message = update['channel_post']
-                elif 'message' in update:
-                    if update['message']['chat']['id'] == chat_id:
-                        message = update['message']
-                
-                if message:
-                    last_message = parse_message(message)
-                    break
-        
-        if last_message:
-            return {
-                'success': True,
-                'channel': chat_info,
-                'message': last_message,
-                'fetched_at': datetime.utcnow().isoformat()
-            }
-        else:
-            return {
-                'success': True,
-                'channel': chat_info,
-                'message': None,
-                'warning': 'No recent messages in updates. Bot may need to be in channel longer.',
-                'fetched_at': datetime.utcnow().isoformat()
-            }
-            
-    except Exception as e:
-        return {
-            'success': False,
-            'error': str(e)
-        }
-
 def parse_message(message):
-    """Parse a Telegram message into structured format"""
+    """Parse Telegram message to structured format"""
+    if not message:
+        return None
+    
     parsed = {
-        'message_id': message.get('message_id'),
-        'date': message.get('date'),
-        'date_iso': datetime.fromtimestamp(message.get('date', 0)).isoformat(),
-        'type': 'unknown'
+        'message_id': message.id,
+        'date': message.date.isoformat() if message.date else None,
+        'type': 'text'
     }
     
-    if 'text' in message:
-        parsed['type'] = 'text'
-        parsed['text'] = message['text']
-    elif 'caption' in message:
+    # Text content
+    if message.text:
+        parsed['text'] = message.text
+    elif message.caption:
+        parsed['text'] = message.caption
         parsed['type'] = 'media_with_caption'
-        parsed['caption'] = message['caption']
     
-    if 'photo' in message:
-        parsed['type'] = 'photo' if 'text' not in message else 'photo_with_caption'
-        parsed['media_info'] = {
-            'type': 'photo',
-            'file_id': message['photo'][-1]['file_id'],
-            'width': message['photo'][-1].get('width'),
-            'height': message['photo'][-1].get('height')
-        }
-    elif 'video' in message:
-        parsed['type'] = 'video' if 'caption' not in message else 'video_with_caption'
-        parsed['media_info'] = {
-            'type': 'video',
-            'file_id': message['video']['file_id'],
-            'duration': message['video'].get('duration'),
-            'mime_type': message['video'].get('mime_type')
-        }
-    elif 'document' in message:
-        parsed['type'] = 'document' if 'caption' not in message else 'document_with_caption'
-        parsed['media_info'] = {
-            'type': 'document',
-            'file_id': message['document']['file_id'],
-            'file_name': message['document'].get('file_name'),
-            'mime_type': message['document'].get('mime_type'),
-            'file_size': message['document'].get('file_size')
-        }
-    elif 'audio' in message:
-        parsed['type'] = 'audio'
-        parsed['media_info'] = {
-            'type': 'audio',
-            'file_id': message['audio']['file_id'],
-            'duration': message['audio'].get('duration'),
-            'title': message['audio'].get('title'),
-            'performer': message['audio'].get('performer')
-        }
-    elif 'voice' in message:
-        parsed['type'] = 'voice'
-        parsed['media_info'] = {
-            'type': 'voice',
-            'file_id': message['voice']['file_id'],
-            'duration': message['voice'].get('duration')
-        }
-    elif 'sticker' in message:
-        parsed['type'] = 'sticker'
-        parsed['media_info'] = {
-            'type': 'sticker',
-            'file_id': message['sticker']['file_id'],
-            'emoji': message['sticker'].get('emoji')
-        }
+    # Media types
+    if message.media:
+        if isinstance(message.media, MessageMediaPhoto):
+            parsed['media_type'] = 'photo'
+            parsed['type'] = 'photo' if not message.text else 'photo_with_caption'
+        elif isinstance(message.media, MessageMediaDocument):
+            doc = message.media.document
+            if doc:
+                for attr in doc.attributes:
+                    if hasattr(attr, 'file_name'):
+                        parsed['file_name'] = attr.file_name
+                    if hasattr(attr, 'duration'):
+                        parsed['duration'] = attr.duration
+                        
+            # Determine document type
+            mime_type = doc.mime_type if doc else ''
+            if 'video' in mime_type:
+                parsed['media_type'] = 'video'
+                parsed['type'] = 'video' if not message.caption else 'video_with_caption'
+            elif 'audio' in mime_type:
+                parsed['media_type'] = 'audio'
+                parsed['type'] = 'audio'
+            elif 'image' in mime_type:
+                parsed['media_type'] = 'image'
+                parsed['type'] = 'image'
+            else:
+                parsed['media_type'] = 'document'
+                parsed['type'] = 'document'
+        elif isinstance(message.media, MessageMediaWebPage):
+            parsed['media_type'] = 'webpage'
+            if hasattr(message.media, 'webpage') and message.media.webpage:
+                parsed['url'] = message.media.webpage.url
+                parsed['title'] = message.media.webpage.title
+                parsed['description'] = message.media.webpage.description
     
-    if 'forward_from' in message:
+    # Views count
+    if hasattr(message, 'views') and message.views:
+        parsed['views'] = message.views
+    
+    # Forward info
+    if message.forward:
         parsed['forwarded'] = True
-        parsed['forward_from'] = {
-            'id': message['forward_from'].get('id'),
-            'name': f"{message['forward_from'].get('first_name', '')} {message['forward_from'].get('last_name', '')}".strip(),
-            'username': message['forward_from'].get('username')
+        if hasattr(message.forward, 'from_id') and message.forward.from_id:
+            parsed['forward_from'] = str(message.forward.from_id)
+    
+    # Reply info
+    if message.reply_to:
+        parsed['reply_to'] = {
+            'message_id': message.reply_to.reply_to_msg_id
         }
     
-    if 'forward_from_chat' in message:
-        parsed['forwarded'] = True
-        parsed['forward_from_chat'] = {
-            'id': message['forward_from_chat'].get('id'),
-            'title': message['forward_from_chat'].get('title'),
-            'username': message['forward_from_chat'].get('username')
-        }
-    
-    if 'entities' in message:
-        parsed['entities'] = []
-        for entity in message['entities']:
-            entity_info = {
-                'type': entity['type'],
-                'offset': entity['offset'],
-                'length': entity['length']
-            }
-            if entity['type'] == 'url' and 'text' in message:
-                entity_info['url'] = message['text'][entity['offset']:entity['offset']+entity['length']]
-            parsed['entities'].append(entity_info)
+    # Reactions
+    if hasattr(message, 'reactions') and message.reactions:
+        parsed['reactions'] = []
+        for reaction in message.reactions.results:
+            if hasattr(reaction, 'reaction'):
+                parsed['reactions'].append({
+                    'emoji': reaction.reaction.emoticon if hasattr(reaction.reaction, 'emoticon') else '👍',
+                    'count': reaction.count
+                })
     
     return parsed
 
-def save_outputs(result, output_format):
-    """Save results in both JSON and text formats"""
+async def get_channel_message(api_id, api_hash, phone_number, channel_url):
+    """Get last message from channel using Telethon"""
     
-    with open('message_output.json', 'w', encoding='utf-8') as f:
-        json.dump(result, f, indent=2, ensure_ascii=False)
+    # Clean channel URL
+    channel_username = clean_channel_url(channel_url)
     
-    with open('message_output.txt', 'w', encoding='utf-8') as f:
-        if not result.get('success'):
-            f.write(f"Error: {result.get('error', 'Unknown error')}\n")
-        elif not result.get('message'):
-            f.write(f"No messages found in channel: {result['channel']['title']}\n")
-            f.write(f"Note: {result.get('warning', '')}\n")
-        else:
-            msg = result['message']
-            ch = result['channel']
-            
-            f.write(f"Channel: {ch['title']} (@{ch['username']})\n")
-            f.write(f"Message ID: {msg['message_id']}\n")
-            f.write(f"Date: {msg['date_iso']}\n")
-            f.write(f"Type: {msg['type']}\n")
-            f.write("-" * 50 + "\n")
-            
-            if 'text' in msg:
-                f.write(f"Text: {msg['text']}\n")
-            if 'caption' in msg:
-                f.write(f"Caption: {msg['caption']}\n")
-            if 'media_info' in msg:
-                f.write(f"Media: {json.dumps(msg['media_info'], indent=2)}\n")
+    if not channel_username:
+        return {
+            'success': False,
+            'error': 'Invalid channel URL'
+        }
+    
+    # Create client
+    client = TelegramClient('github_session', int(api_id), api_hash)
+    
+    try:
+        # Start client with phone number
+        await client.start(phone=phone_number)
+        
+        print(f"✅ Connected to Telegram as user")
+        
+        # Get channel entity
+        try:
+            entity = await client.get_entity(channel_username)
+        except UsernameNotOccupiedError:
+            return {
+                'success': False,
+                'error': f"Channel @{channel_username} does not exist"
+            }
+        except ChannelPrivateError:
+            return {
+                'success': False,
+                'error': f"Channel @{channel_username} is private and you're not a member"
+            }
+        except ValueError as e:
+            return {
+                'success': False,
+                'error': f"Cannot find channel: {channel_username}. Error: {str(e)}"
+            }
+        
+        # Get channel info
+        channel_info = {
+            'id': str(entity.id),
+            'title': entity.title,
+            'username': entity.username or channel_username,
+            'type': 'supergroup' if getattr(entity, 'megagroup', False) else 'channel',
+            'participants_count': getattr(entity, 'participants_count', 0) if hasattr(entity, 'participants_count') else None
+        }
+        
+        # Get last message
+        messages = await client.get_messages(entity, limit=1)
+        
+        if not messages or not messages[0]:
+            return {
+                'success': True,
+                'channel': channel_info,
+                'message': None,
+                'warning': 'Channel has no messages'
+            }
+        
+        message = messages[0]
+        
+        # Parse message
+        parsed_message = parse_message(message)
+        
+        return {
+            'success': True,
+            'channel': channel_info,
+            'message': parsed_message,
+            'total_messages': getattr(entity, 'broadcast', False) and 'N/A' or None
+        }
+        
+    except Exception as e:
+        return {
+            'success': False,
+            'error': f'Unexpected error: {str(e)}'
+        }
+    finally:
+        await client.disconnect()
+        # Clean up session file
+        try:
+            if os.path.exists('github_session.session'):
+                os.remove('github_session.session')
+        except:
+            pass
+
+def format_text_output(result):
+    """Format result as readable text"""
+    if not result.get('success'):
+        return f"❌ Error: {result.get('error', 'Unknown error')}"
+    
+    lines = []
+    
+    # Channel info
+    channel = result.get('channel', {})
+    lines.append("=" * 50)
+    lines.append(f"📢 Channel: {channel.get('title', 'Unknown')}")
+    lines.append(f"   Username: @{channel.get('username', 'N/A')}")
+    lines.append(f"   Type: {channel.get('type', 'unknown')}")
+    lines.append("=" * 50)
+    
+    # Message
+    message = result.get('message')
+    if not message:
+        lines.append("⚠️ No messages in channel")
+        if result.get('warning'):
+            lines.append(f"Note: {result['warning']}")
+        return '\n'.join(lines)
+    
+    lines.append(f"🆔 Message ID: {message.get('message_id')}")
+    lines.append(f"📅 Date: {message.get('date', 'Unknown')}")
+    lines.append(f"📝 Type: {message.get('type', 'text')}")
+    
+    if message.get('views'):
+        lines.append(f"👁️ Views: {message['views']}")
+    
+    lines.append("-" * 50)
+    
+    # Content
+    if message.get('text'):
+        lines.append(f"💬 Content:")
+        lines.append(message['text'])
+    
+    # Media info
+    if message.get('media_type'):
+        lines.append(f"\n📎 Media: {message['media_type']}")
+        if message.get('file_name'):
+            lines.append(f"   File: {message['file_name']}")
+        if message.get('duration'):
+            lines.append(f"   Duration: {message['duration']}s")
+    
+    # URLs
+    if message.get('url'):
+        lines.append(f"\n🔗 URL: {message['url']}")
+        if message.get('title'):
+            lines.append(f"   Title: {message['title']}")
+    
+    # Forwarded
+    if message.get('forwarded'):
+        lines.append("\n↗️ Forwarded message")
+    
+    # Reply
+    if message.get('reply_to'):
+        lines.append(f"\n💬 Reply to message: {message['reply_to']['message_id']}")
+    
+    # Reactions
+    if message.get('reactions'):
+        reactions_str = ' '.join([f"{r['emoji']}{r['count']}" for r in message['reactions']])
+        lines.append(f"\n👍 Reactions: {reactions_str}")
+    
+    lines.append("=" * 50)
+    
+    return '\n'.join(lines)
 
 def main():
-    bot_token = os.environ.get('BOT_TOKEN')
+    # Get environment variables
+    api_id = os.environ.get('TELEGRAM_API_ID')
+    api_hash = os.environ.get('TELEGRAM_API_HASH')
+    phone_number = os.environ.get('PHONE_NUMBER')
     channel_url = os.environ.get('CHANNEL_URL')
     output_format = os.environ.get('OUTPUT_FORMAT', 'json')
     
-    if not bot_token or not channel_url:
+    # Validate inputs
+    if not all([api_id, api_hash, phone_number]):
+        missing = []
+        if not api_id: missing.append('TELEGRAM_API_ID')
+        if not api_hash: missing.append('TELEGRAM_API_HASH')
+        if not phone_number: missing.append('PHONE_NUMBER')
+        
         result = {
             'success': False,
-            'error': 'Missing BOT_TOKEN or CHANNEL_URL'
+            'error': f'Missing required secrets: {", ".join(missing)}'
         }
-        save_outputs(result, output_format)
-        print(json.dumps(result))
-        return
-    
-    channel_username = extract_channel_info(channel_url)
-    
-    if not channel_username:
+    elif not channel_url:
         result = {
             'success': False,
-            'error': f'Invalid channel URL: {channel_url}'
+            'error': 'No channel URL provided'
         }
-        save_outputs(result, output_format)
-        print(json.dumps(result))
-        return
+    else:
+        # Run async function
+        import asyncio
+        result = asyncio.run(get_channel_message(
+            int(api_id),
+            api_hash,
+            phone_number,
+            channel_url
+        ))
     
-    result = get_channel_messages(bot_token, channel_username)
-    save_outputs(result, output_format)
+    # Save JSON output
+    with open('message_output.json', 'w', encoding='utf-8') as f:
+        json.dump(result, f, indent=2, ensure_ascii=False)
     
-    if 'GITHUB_OUTPUT' in os.environ:
-        with open(os.environ['GITHUB_OUTPUT'], 'a') as f:
-            f.write(f"status={'success' if result.get('success') else 'failed'}\n")
-            f.write(f"message_json={json.dumps(result)}\n")
-            
-            if result.get('message') and result['message'].get('text'):
-                text = result['message']['text'][:200]
-                f.write(f"message_text={text}\n")
+    # Save text output
+    text_output = format_text_output(result)
+    with open('message_output.txt', 'w', encoding='utf-8') as f:
+        f.write(text_output)
     
-    print(json.dumps(result, indent=2))
+    # Print to console
+    if output_format == 'text':
+        print(text_output)
+    else:
+        print(json.dumps(result, indent=2, ensure_ascii=False))
+    
+    # Exit with error code if failed
+    if not result.get('success'):
+        sys.exit(1)
 
-if __name__ == "__main__":
+if __name__ == '__main__':
     main()
